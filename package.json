@@ -1,8 +1,11 @@
 {
   "name": "enthemed",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "Server.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node Server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
   }
 }
