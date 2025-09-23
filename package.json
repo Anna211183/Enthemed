@@ -1,13 +1,12 @@
 {
   "name": "enthemed",
   "version": "1.0.0",
-  "main": "server.js",
-  "license": "MIT",
+  "main": "Server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node Server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.3.1"
   }
 }
