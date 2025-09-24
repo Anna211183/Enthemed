@@ -1,8 +1,9 @@
-// server.js – Enthemed (med Shopify OAuth)
+// Server.js – Enthemed (Shopify OAuth + Dashboard)
 const express = require('express');
 const dotenv = require('dotenv');
 const crypto = require('crypto');
 
+// -------------------- Boot & config --------------------
 dotenv.config();
 
 function reqEnv(name) {
@@ -17,40 +18,40 @@ function reqEnv(name) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Shopify app config
 const apiKey = reqEnv('SHOPIFY_API_KEY');
 const apiSecret = reqEnv('SHOPIFY_API_SECRET');
-const appUrl = reqEnv('SHOPIFY_APP_URL');           // e.g. https://enthemed-1.onrender.com
-const scopes = (process.env.SHOPIFY_SCOPES || '').split(',').map(s => s.trim()).join(',');
+const appUrl = reqEnv('SHOPIFY_APP_URL'); // e.g. https://enthemed-1.onrender.com
+const scopes = (process.env.SHOPIFY_SCOPES || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+  .join(',');
 const hostName = appUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-
-// ======== Enkle "lagringer" i minne (OK for nå) ========
-const stateStore = new Map();              // state -> timestamp
-const tokenStore = new Map();              // shop -> access_token
-
-// Hjelpere
-const hostName = process.env.SHOPIFY_APP_URL.replace(/^https?:\/\//, '').replace(/\/$/, '');
-const apiKey = process.env.SHOPIFY_API_KEY;
-const apiSecret = process.env.SHOPIFY_API_SECRET;
-const scopes = (process.env.SHOPIFY_SCOPES || '').split(',').map(s => s.trim()).join(',');
 const apiVersion = '2025-01';
 
-// Verifiser HMAC fra Shopify callback
+// -------------------- In-memory stores (ok for nå) --------------------
+const stateStore = new Map();  // state -> ts
+const tokenStore = new Map();  // shop -> access_token
+
+// -------------------- Utils --------------------
 function validHmac(query) {
+  // Verify HMAC from Shopify callback
   const { hmac, signature, ...rest } = query;
   const message = Object.keys(rest)
     .sort()
     .map(k => `${k}=${Array.isArray(rest[k]) ? rest[k].join(',') : rest[k]}`)
     .join('&');
 
-  const digest = crypto
-    .createHmac('sha256', apiSecret)
-    .update(message)
-    .digest('hex');
-
-  return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(hmac, 'utf8'));
+  const digest = crypto.createHmac('sha256', apiSecret).update(message).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(hmac, 'utf8'));
+  } catch {
+    return false;
+  }
 }
 
-// ======== DASHBOARD UI (embedded eller stand-alone) ========
+// -------------------- UI (/) --------------------
 app.get('/', (_req, res) => {
   res.send(`
   <div style="font-family:system-ui;padding:16px;line-height:1.45">
@@ -92,30 +93,32 @@ app.get('/', (_req, res) => {
   `);
 });
 
-// ======== START OAUTH ========
+// -------------------- OAuth start --------------------
 app.get('/auth', (req, res) => {
   const shop = String(req.query.shop || '').toLowerCase();
   if (!shop.endsWith('.myshopify.com')) {
     return res.status(400).send('Missing/invalid ?shop=xxxx.myshopify.com');
   }
 
-  // Hvis vi har token i minne, gå rett til appen
   if (tokenStore.get(shop)) {
-    return res.redirect('/');
+    return res.redirect('/'); // already authed
   }
 
   const state = crypto.randomBytes(16).toString('hex');
   stateStore.set(state, Date.now());
 
   const redirectUri = `https://${hostName}/auth/callback`;
-  const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${apiKey}&scope=${encodeURIComponent(
-    scopes
-  )}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
+  const installUrl =
+    `https://${shop}/admin/oauth/authorize` +
+    `?client_id=${apiKey}` +
+    `&scope=${encodeURIComponent(scopes)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&state=${state}`;
 
   res.redirect(installUrl);
 });
 
-// ======== OAUTH CALLBACK ========
+// -------------------- OAuth callback --------------------
 app.get('/auth/callback', async (req, res) => {
   try {
     const { shop, hmac, code, state } = req.query;
@@ -123,14 +126,12 @@ app.get('/auth/callback', async (req, res) => {
     if (!shop || !hmac || !code || !state) {
       return res.status(400).send('Missing parameters');
     }
-    // sjekk state
     if (!stateStore.has(state)) return res.status(400).send('Invalid state');
     stateStore.delete(state);
 
-    // verifiser hmac
     if (!validHmac(req.query)) return res.status(400).send('HMAC validation failed');
 
-    // bytt code -> access_token
+    // Exchange code for access token
     const tokenRes = await fetch(`https://${shop}/admin/oauth/access_token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -139,4 +140,69 @@ app.get('/auth/callback', async (req, res) => {
 
     if (!tokenRes.ok) {
       const t = await tokenRes.text();
-      return res.status
+      return res.status(401).send('Token exchange failed: ' + t);
+    }
+
+    const { access_token } = await tokenRes.json();
+    tokenStore.set(String(shop), access_token);
+
+    return res.redirect('/');
+  } catch (e) {
+    console.error('OAuth callback error', e);
+    return res.status(500).send('Auth error');
+  }
+});
+
+// -------------------- KPI API --------------------
+app.get('/dashboard/summary', async (_req, res) => {
+  try {
+    const shop = '3b1vc0-xj.myshopify.com'; // din butikk
+    let token = tokenStore.get(shop);
+
+    // Fallback: bruk Admin API access token fra env hvis OAuth ikke er gjort enda
+    if (!token && process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN) {
+      token = process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN;
+    }
+    if (!token) return res.status(401).json({ error: 'No Shopify session' });
+
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    const url =
+      `https://${shop}/admin/api/${apiVersion}/orders.json` +
+      `?status=any&created_at_min=${encodeURIComponent(since)}` +
+      `&fields=total_price,currency`;
+
+    const r = await fetch(url, {
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!r.ok) {
+      const t = await r.text();
+      return res.status(500).json({ error: 'Shopify API error: ' + t });
+    }
+
+    const data = await r.json();
+    const orders = data.orders || [];
+    const revenue = orders.reduce((sum, o) => sum + parseFloat(o.total_price || 0), 0);
+    const currency = orders[0]?.currency || 'NOK';
+
+    res.json({ orders: orders.length, revenue, currency, note: '' });
+  } catch (e) {
+    console.error('summary error', e);
+    res.status(500).json({ error: 'Internal' });
+  }
+});
+
+// -------------------- (Valgfritt) andre ruter --------------------
+try {
+  const dashboardRoutes = require('./Routes/Dashboard');
+  app.use('/dashboard', dashboardRoutes);
+} catch { /* ignorer hvis mappa ikke finnes */ }
+
+// -------------------- Start server --------------------
+app.listen(PORT, () => {
+  console.log(`Enthemed server listening on port ${PORT}`);
+});
