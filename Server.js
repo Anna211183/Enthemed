@@ -5,8 +5,23 @@ const crypto = require('crypto');
 
 dotenv.config();
 
+function reqEnv(name) {
+  const v = process.env[name];
+  if (!v || String(v).trim() === '') {
+    console.error(`Missing required env: ${name}`);
+    process.exit(1);
+  }
+  return String(v).trim();
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+const apiKey = reqEnv('SHOPIFY_API_KEY');
+const apiSecret = reqEnv('SHOPIFY_API_SECRET');
+const appUrl = reqEnv('SHOPIFY_APP_URL');           // e.g. https://enthemed-1.onrender.com
+const scopes = (process.env.SHOPIFY_SCOPES || '').split(',').map(s => s.trim()).join(',');
+const hostName = appUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
 // ======== Enkle "lagringer" i minne (OK for nå) ========
 const stateStore = new Map();              // state -> timestamp
