@@ -20,7 +20,7 @@ const PORT = process.env.PORT || 3000;
 // --- Konfig ---
 const apiKey = reqEnv('SHOPIFY_API_KEY');
 const apiSecret = reqEnv('SHOPIFY_API_SECRET');
-const appUrl = reqEnv('SHOPIFY_APP_URL'); // fx https://enthemed-1.onrender.com
+const appUrl = reqEnv('SHOPIFY_APP_URL'); // f.eks. https://enthemed-1.onrender.com
 const scopes = (process.env.SHOPIFY_SCOPES || '')
   .split(',')
   .map(s => s.trim())
