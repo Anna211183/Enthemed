@@ -1,14 +1,14 @@
 {
   "name": "enthemed",
   "version": "1.0.0",
-  "description": "Enthemed – Shopify app (Node/Express)",
+  "description": "Enthemed - Shopify app (Node/Express)",
   "main": "Server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node Server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   },
   "dependencies": {
     "@shopify/shopify-api": "^11.0.0",
