@@ -1,9 +1,8 @@
-// Server.js – Enthemed (Shopify OAuth + Dashboard)
+// Server.js – Enthemed (stabil: bruker ADMIN_API_ACCESS_TOKEN først)
 const express = require('express');
 const dotenv = require('dotenv');
 const crypto = require('crypto');
 
-// -------------------- Boot & config --------------------
 dotenv.config();
 
 function reqEnv(name) {
@@ -18,10 +17,10 @@ function reqEnv(name) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Shopify app config
+// --- Konfig ---
 const apiKey = reqEnv('SHOPIFY_API_KEY');
 const apiSecret = reqEnv('SHOPIFY_API_SECRET');
-const appUrl = reqEnv('SHOPIFY_APP_URL'); // e.g. https://enthemed-1.onrender.com
+const appUrl = reqEnv('SHOPIFY_APP_URL'); // fx https://enthemed-1.onrender.com
 const scopes = (process.env.SHOPIFY_SCOPES || '')
   .split(',')
   .map(s => s.trim())
@@ -30,19 +29,20 @@ const scopes = (process.env.SHOPIFY_SCOPES || '')
 const hostName = appUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
 const apiVersion = '2025-01';
 
-// -------------------- In-memory stores (ok for nå) --------------------
-const stateStore = new Map();  // state -> ts
-const tokenStore = new Map();  // shop -> access_token
+// Butikkdomene – hardkodet for nå
+const SHOP = '3b1vc0-xj.myshopify.com';
 
-// -------------------- Utils --------------------
+// --- In-memory (fallback) ---
+const stateStore = new Map();    // state -> ts
+const tokenStore = new Map();    // shop -> access_token
+
+// --- HMAC verif ---
 function validHmac(query) {
-  // Verify HMAC from Shopify callback
   const { hmac, signature, ...rest } = query;
   const message = Object.keys(rest)
     .sort()
     .map(k => `${k}=${Array.isArray(rest[k]) ? rest[k].join(',') : rest[k]}`)
     .join('&');
-
   const digest = crypto.createHmac('sha256', apiSecret).update(message).digest('hex');
   try {
     return crypto.timingSafeEqual(Buffer.from(digest, 'utf8'), Buffer.from(hmac, 'utf8'));
@@ -51,7 +51,7 @@ function validHmac(query) {
   }
 }
 
-// -------------------- UI (/) --------------------
+// --- Hovedside ---
 app.get('/', (_req, res) => {
   res.send(`
   <div style="font-family:system-ui;padding:16px;line-height:1.45">
@@ -69,7 +69,7 @@ app.get('/', (_req, res) => {
     <small id="note" style="color:#666"></small>
 
     <div style="margin-top:16px">
-      <a href="/auth?shop=3b1vc0-xj.myshopify.com">🔑 Koble til Shopify (hvis nødvendig)</a>
+      <a href="/auth?shop=${SHOP}">🔑 Koble til Shopify (om nødvendig)</a>
     </div>
 
     <script>
@@ -85,7 +85,7 @@ app.get('/', (_req, res) => {
       } catch (e) {
         document.getElementById('rev').textContent = '–';
         document.getElementById('cnt').textContent = '–';
-        document.getElementById('note').textContent = 'Merk: No Shopify session – klikk “Koble til Shopify”.';
+        document.getElementById('note').textContent = 'Kunne ikke hente data. Klikk “Koble til Shopify” eller sjekk ACCESS_TOKEN.';
       }
     })();
     </script>
@@ -93,16 +93,13 @@ app.get('/', (_req, res) => {
   `);
 });
 
-// -------------------- OAuth start --------------------
+// --- Start OAuth (reserve) ---
 app.get('/auth', (req, res) => {
   const shop = String(req.query.shop || '').toLowerCase();
   if (!shop.endsWith('.myshopify.com')) {
     return res.status(400).send('Missing/invalid ?shop=xxxx.myshopify.com');
   }
-
-  if (tokenStore.get(shop)) {
-    return res.redirect('/'); // already authed
-  }
+  if (tokenStore.get(shop)) return res.redirect('/');
 
   const state = crypto.randomBytes(16).toString('hex');
   stateStore.set(state, Date.now());
@@ -118,34 +115,26 @@ app.get('/auth', (req, res) => {
   res.redirect(installUrl);
 });
 
-// -------------------- OAuth callback --------------------
+// --- OAuth callback (reserve) ---
 app.get('/auth/callback', async (req, res) => {
   try {
     const { shop, hmac, code, state } = req.query;
-
-    if (!shop || !hmac || !code || !state) {
-      return res.status(400).send('Missing parameters');
-    }
+    if (!shop || !hmac || !code || !state) return res.status(400).send('Missing parameters');
     if (!stateStore.has(state)) return res.status(400).send('Invalid state');
     stateStore.delete(state);
-
     if (!validHmac(req.query)) return res.status(400).send('HMAC validation failed');
 
-    // Exchange code for access token
     const tokenRes = await fetch(`https://${shop}/admin/oauth/access_token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: apiKey, client_secret: apiSecret, code })
     });
-
     if (!tokenRes.ok) {
       const t = await tokenRes.text();
       return res.status(401).send('Token exchange failed: ' + t);
     }
-
     const { access_token } = await tokenRes.json();
     tokenStore.set(String(shop), access_token);
-
     return res.redirect('/');
   } catch (e) {
     console.error('OAuth callback error', e);
@@ -153,22 +142,25 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
-// -------------------- KPI API --------------------
+// --- KPI-endepunkt (prioriterer ADMIN_API_ACCESS_TOKEN) ---
 app.get('/dashboard/summary', async (_req, res) => {
   try {
-    const shop = '3b1vc0-xj.myshopify.com'; // din butikk
-    let token = tokenStore.get(shop);
+    // 1) Førstevalg: fast token fra env (stabilt)
+    let token = (process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN || '').trim();
 
-    // Fallback: bruk Admin API access token fra env hvis OAuth ikke er gjort enda
-    if (!token && process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN) {
-      token = process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN;
+    // 2) Hvis ikke satt, bruk OAuth-token i minne
+    if (!token) token = tokenStore.get(SHOP);
+
+    if (!token) {
+      return res.status(401).json({
+        error: 'No token available',
+        note: 'Klikk “Koble til Shopify” eller sett SHOPIFY_ADMIN_API_ACCESS_TOKEN i Render.'
+      });
     }
-    if (!token) return res.status(401).json({ error: 'No Shopify session' });
 
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
     const url =
-      `https://${shop}/admin/api/${apiVersion}/orders.json` +
+      `https://${SHOP}/admin/api/${apiVersion}/orders.json` +
       `?status=any&created_at_min=${encodeURIComponent(since)}` +
       `&fields=total_price,currency`;
 
@@ -181,7 +173,7 @@ app.get('/dashboard/summary', async (_req, res) => {
 
     if (!r.ok) {
       const t = await r.text();
-      return res.status(500).json({ error: 'Shopify API error: ' + t });
+      return res.status(502).json({ error: 'Shopify API error', detail: t });
     }
 
     const data = await r.json();
@@ -196,13 +188,10 @@ app.get('/dashboard/summary', async (_req, res) => {
   }
 });
 
-// -------------------- (Valgfritt) andre ruter --------------------
-try {
-  const dashboardRoutes = require('./Routes/Dashboard');
-  app.use('/dashboard', dashboardRoutes);
-} catch { /* ignorer hvis mappa ikke finnes */ }
+// --- Healthcheck ---
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// -------------------- Start server --------------------
+// --- Start server ---
 app.listen(PORT, () => {
   console.log(`Enthemed server listening on port ${PORT}`);
 });
