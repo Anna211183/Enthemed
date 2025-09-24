@@ -51,43 +51,130 @@ function validHmac(query) {
   }
 }
 
-// --- Hovedside ---
+// --- Hovedside (UI) ---
 app.get('/', (_req, res) => {
   res.send(`
-  <div style="font-family:system-ui;padding:16px;line-height:1.45">
-    <h2>Enthemed – Dashboard</h2>
-    <div style="display:flex;gap:16px;margin:16px 0">
-      <div style="border:1px solid #eee;padding:12px;border-radius:12px">
-        <div>Siste 7 dager – Omsetning</div>
-        <div id="rev" style="font-size:24px;font-weight:700">…</div>
+  <div style="font-family:system-ui;padding:16px;line-height:1.45;color:#111;background:#fff">
+    <h2 style="margin:0 0 12px;font-weight:800;">Enthemed – Dashboard</h2>
+
+    <div style="display:flex;gap:16px;margin:16px 0;flex-wrap:wrap">
+      <div style="border:1px solid #ddd;padding:14px 16px;border-radius:12px;min-width:260px">
+        <div style="font-size:14px;color:#222">Siste 7 dager – Omsetning</div>
+        <div id="rev" style="font-size:28px;font-weight:800;color:#111;margin-top:4px">…</div>
       </div>
-      <div style="border:1px solid #eee;padding:12px;border-radius:12px">
-        <div>Siste 7 dager – Antall ordre</div>
-        <div id="cnt" style="font-size:24px;font-weight:700">…</div>
+      <div style="border:1px solid #ddd;padding:14px 16px;border-radius:12px;min-width:260px">
+        <div style="font-size:14px;color:#222">Siste 7 dager – Antall ordre</div>
+        <div id="cnt" style="font-size:28px;font-weight:800;color:#111;margin-top:4px">…</div>
       </div>
     </div>
-    <small id="note" style="color:#666"></small>
+
+    <div id="empty" style="margin-top:6px;font-size:14px;color:#333;display:none">
+      Ingen ordre de siste 7 dagene.
+    </div>
 
     <div style="margin-top:16px">
-      <a href="/auth?shop=${SHOP}">🔑 Koble til Shopify (om nødvendig)</a>
+      <button id="connect" style="cursor:pointer;border:1px solid #bbb;padding:8px 12px;border-radius:10px;background:#fafafa">
+        🔑 Koble til Shopify (om nødvendig)
+      </button>
+      <button id="reload" style="cursor:pointer;border:1px solid #bbb;padding:8px 12px;border-radius:10px;background:#fafafa;margin-left:8px">
+        🔄 Oppdater
+      </button>
+    </div>
+
+    <div style="margin-top:24px;">
+      <h3 style="margin:0 0 8px;font-weight:700;">Siste 14 dager – Omsetning & ordre</h3>
+      <canvas id="salesChart" height="120"></canvas>
     </div>
 
     <script>
-    (async () => {
-      try {
-        const r = await fetch('/dashboard/summary', { credentials: 'include' });
-        const d = await r.json();
-        if (d.error) throw new Error(d.error);
-        const fmt = new Intl.NumberFormat(undefined, { style:'currency', currency: d.currency || 'NOK' });
-        document.getElementById('rev').textContent = fmt.format(d.revenue || 0);
-        document.getElementById('cnt').textContent = d.orders || 0;
-        document.getElementById('note').textContent = d.note || '';
-      } catch (e) {
-        document.getElementById('rev').textContent = '–';
-        document.getElementById('cnt').textContent = '–';
-        document.getElementById('note').textContent = 'Kunne ikke hente data. Klikk “Koble til Shopify” eller sjekk ACCESS_TOKEN.';
-      }
-    })();
+      // Knappene
+      document.getElementById('connect').onclick = () => {
+        const url = '/auth?shop=${SHOP}';
+        if (window.top) window.top.location.href = url; else window.location.href = url;
+      };
+      document.getElementById('reload').onclick = () => {
+        if (window.top) window.top.location.reload(); else window.location.reload();
+      };
+
+      // KPI: summary
+      (async () => {
+        try {
+          const r = await fetch('/dashboard/summary', { credentials: 'include', cache:'no-store' });
+          const d = await r.json();
+          if (d.error) throw new Error(d.error);
+
+          const fmt = new Intl.NumberFormat(undefined, { style:'currency', currency: d.currency || 'NOK' });
+          const hasOrders = (d.orders || 0) > 0;
+
+          document.getElementById('rev').textContent = hasOrders ? fmt.format(d.revenue || 0) : '0,00 kr';
+          document.getElementById('cnt').textContent = hasOrders ? (d.orders || 0) : '0';
+          document.getElementById('empty').style.display = hasOrders ? 'none' : 'block';
+        } catch (e) {
+          document.getElementById('rev').textContent = '–';
+          document.getElementById('cnt').textContent = '–';
+          document.getElementById('empty').style.display = 'block';
+          document.getElementById('empty').textContent = 'Kunne ikke hente data. Klikk “Koble til Shopify” eller sjekk ACCESS_TOKEN.';
+        }
+      })();
+    </script>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+      // Linjegraf: omsetning + ordre (siste 14 dager)
+      (async () => {
+        try {
+          const r = await fetch('/dashboard/daily?days=14', { cache: 'no-store' });
+          const d = await r.json();
+          if (d.error) throw new Error(d.error);
+
+          const labels = d.data.map(x => x.date.slice(5)); // mm-dd
+          const revenues = d.data.map(x => x.revenue);
+          const orders = d.data.map(x => x.orders);
+
+          const ctx = document.getElementById('salesChart').getContext('2d');
+          new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels,
+              datasets: [
+                {
+                  label: 'Omsetning (' + (d.currency || 'NOK') + ')',
+                  data: revenues,
+                  borderWidth: 2,
+                  borderColor: '#4e79a7',
+                  backgroundColor: 'rgba(78,121,167,0.08)',
+                  fill: true,
+                  tension: 0.25,
+                  yAxisID: 'y1'
+                },
+                {
+                  label: 'Ordre (antall)',
+                  data: orders,
+                  borderWidth: 2,
+                  borderColor: '#f28e2b',
+                  backgroundColor: 'rgba(242,142,43,0.08)',
+                  fill: true,
+                  tension: 0.25,
+                  yAxisID: 'y2'
+                }
+              ]
+            },
+            options: {
+              responsive: true,
+              interaction: { mode: 'index', intersect: false },
+              scales: {
+                y1: { type: 'linear', position: 'left', grid: { drawOnChartArea: true } },
+                y2: { type: 'linear', position: 'right', grid: { drawOnChartArea: false } }
+              }
+            }
+          });
+        } catch (e) {
+          console.error('Chart error', e);
+          const c = document.getElementById('salesChart');
+          if (c) c.outerHTML = '<div style="color:#b00">Kunne ikke laste salgsgraf.</div>';
+        }
+      })();
     </script>
   </div>
   `);
@@ -96,9 +183,7 @@ app.get('/', (_req, res) => {
 // --- Start OAuth (reserve) ---
 app.get('/auth', (req, res) => {
   const shop = String(req.query.shop || '').toLowerCase();
-  if (!shop.endsWith('.myshopify.com')) {
-    return res.status(400).send('Missing/invalid ?shop=xxxx.myshopify.com');
-  }
+  if (!shop.endsWith('.myshopify.com')) return res.status(400).send('Missing/invalid ?shop=xxxx.myshopify.com');
   if (tokenStore.get(shop)) return res.redirect('/');
 
   const state = crypto.randomBytes(16).toString('hex');
@@ -145,12 +230,8 @@ app.get('/auth/callback', async (req, res) => {
 // --- KPI-endepunkt (prioriterer ADMIN_API_ACCESS_TOKEN) ---
 app.get('/dashboard/summary', async (_req, res) => {
   try {
-    // 1) Førstevalg: fast token fra env (stabilt)
     let token = (process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN || '').trim();
-
-    // 2) Hvis ikke satt, bruk OAuth-token i minne
     if (!token) token = tokenStore.get(SHOP);
-
     if (!token) {
       return res.status(401).json({
         error: 'No token available',
@@ -188,29 +269,21 @@ app.get('/dashboard/summary', async (_req, res) => {
   }
 });
 
-// --- Healthcheck ---
-app.get('/health', (_req, res) => res.json({ ok: true }));
-
-// --- Start server ---
-app.listen(PORT, () => {
-  console.log(`Enthemed server listening on port ${PORT}`);
-});
 // --- Sales per day (last N days) ---
 app.get('/dashboard/daily', async (req, res) => {
   try {
     const days = Math.max(1, Math.min(90, parseInt(req.query.days || '7', 10)));
-    const shop = '3b1vc0-xj.myshopify.com';
     let token = (process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN || '').trim();
-    if (!token) token = tokenStore.get(shop);
+    if (!token) token = tokenStore.get(SHOP);
     if (!token) return res.status(401).json({ error: 'No token available' });
 
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const sinceISO = since.toISOString();
     const url =
-      `https://${shop}/admin/api/${apiVersion}/orders.json` +
+      `https://${SHOP}/admin/api/${apiVersion}/orders.json` +
       `?status=any&created_at_min=${encodeURIComponent(sinceISO)}` +
       `&fields=total_price,currency,created_at&limit=250`;
-    // NOTE: For real stores with many orders, you’d page with page_info. Fine for now.
+    // NOTE: For stores med mange ordre må du paginere (page_info). Holder for nå.
 
     const r = await fetch(url, {
       headers: {
@@ -224,7 +297,7 @@ app.get('/dashboard/daily', async (req, res) => {
     const orders = data.orders || [];
     const currency = orders[0]?.currency || 'NOK';
 
-    // Seed all days to avoid gaps
+    // Seed alle dager
     const dayKey = (d) => d.toISOString().slice(0, 10);
     const series = {};
     for (let i = 0; i < days; i++) {
@@ -234,7 +307,7 @@ app.get('/dashboard/daily', async (req, res) => {
       series[dayKey(d)] = { date: dayKey(d), revenue: 0, orders: 0 };
     }
 
-    // Group
+    // Gruppér
     for (const o of orders) {
       const d = new Date(o.created_at);
       const key = dayKey(new Date(d.getFullYear(), d.getMonth(), d.getDate()));
@@ -249,4 +322,12 @@ app.get('/dashboard/daily', async (req, res) => {
     console.error('daily error', e);
     res.status(500).json({ error: 'Internal' });
   }
+});
+
+// --- Healthcheck ---
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// --- Start server ---
+app.listen(PORT, () => {
+  console.log(`Enthemed server listening on port ${PORT}`);
 });
