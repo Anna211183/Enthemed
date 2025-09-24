@@ -195,3 +195,58 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.listen(PORT, () => {
   console.log(`Enthemed server listening on port ${PORT}`);
 });
+// --- Sales per day (last N days) ---
+app.get('/dashboard/daily', async (req, res) => {
+  try {
+    const days = Math.max(1, Math.min(90, parseInt(req.query.days || '7', 10)));
+    const shop = '3b1vc0-xj.myshopify.com';
+    let token = (process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN || '').trim();
+    if (!token) token = tokenStore.get(shop);
+    if (!token) return res.status(401).json({ error: 'No token available' });
+
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const sinceISO = since.toISOString();
+    const url =
+      `https://${shop}/admin/api/${apiVersion}/orders.json` +
+      `?status=any&created_at_min=${encodeURIComponent(sinceISO)}` +
+      `&fields=total_price,currency,created_at&limit=250`;
+    // NOTE: For real stores with many orders, you’d page with page_info. Fine for now.
+
+    const r = await fetch(url, {
+      headers: {
+        'X-Shopify-Access-Token': token,
+        'Content-Type': 'application/json',
+      },
+    });
+    if (!r.ok) return res.status(502).json({ error: 'Shopify API error', detail: await r.text() });
+
+    const data = await r.json();
+    const orders = data.orders || [];
+    const currency = orders[0]?.currency || 'NOK';
+
+    // Seed all days to avoid gaps
+    const dayKey = (d) => d.toISOString().slice(0, 10);
+    const series = {};
+    for (let i = 0; i < days; i++) {
+      const d = new Date();
+      d.setHours(0,0,0,0);
+      d.setDate(d.getDate() - (days - 1 - i));
+      series[dayKey(d)] = { date: dayKey(d), revenue: 0, orders: 0 };
+    }
+
+    // Group
+    for (const o of orders) {
+      const d = new Date(o.created_at);
+      const key = dayKey(new Date(d.getFullYear(), d.getMonth(), d.getDate()));
+      if (!series[key]) continue;
+      series[key].revenue += parseFloat(o.total_price || 0);
+      series[key].orders += 1;
+    }
+
+    const result = Object.values(series);
+    res.json({ days, currency, data: result });
+  } catch (e) {
+    console.error('daily error', e);
+    res.status(500).json({ error: 'Internal' });
+  }
+});
